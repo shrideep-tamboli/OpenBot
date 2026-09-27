@@ -1,0 +1,22 @@
+# Layered on by `./run-openbot.sh --local`, never by a plain `docker compose up`: the script adds it
+# through COMPOSE_FILE, so start.sh and stop.sh need no flag of their own.
+#
+# The only service that needs anything here is the computer. The Bot containers already take their
+# endpoint from OPENAI_CONTAINER_BASE_URL, which the script exports.
+services:
+  agent-computer:
+    environment:
+      # No cloud key on the computer in local mode. compose.override.yml hands opencode the gateway
+      # key and names it in COMPUTER_SHELL_ENV, which makes it readable by every Bot with a shell;
+      # a model on this Mac needs no key, so neither is passed at all.
+      AI_GATEWAY_API_KEY: ""
+      COMPUTER_SHELL_ENV: ""
+
+    # Ollama listens on the host's loopback. Docker Desktop routes this name there.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # Same target as compose.override.yml's mount, so this one replaces it for the run: opencode
+      # reads the local provider instead of the gateway.
+      - ./agent-computer/opencode.local.json:/workspace/.config/opencode/opencode.json:ro

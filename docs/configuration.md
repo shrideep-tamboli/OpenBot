@@ -160,6 +160,39 @@ Most gateways publish a model list, which is the way to check a name before conf
 
 Two things are worth knowing before pointing a deployment at any gateway. Not every catalogue entry accepts tools, and a Bot without tool calling cannot drive its computer; the model list says which do. And `BOT_RESPONSES_API=true` needs an endpoint that implements the Responses API, not only chat completions.
 
+## Local models
+
+`./run-openbot.sh --local` sends every model call to a model on this machine instead of the endpoint in `.env`: the built-in Bots, the intent router, tool selection, conversation titles, `agent-bot`, `agent-langgraph`, and opencode on the computer. Without the flag, nothing changes.
+
+```sh
+brew install ollama
+ollama pull qwen3.5:4b
+./run-openbot.sh --local
+```
+
+It edits nothing in `.env`. The script exports its overrides for that one run, and `start.sh`, Bun's `--env-file` and Compose all let the environment win over the file:
+
+| Variable | Local value |
+| --- | --- |
+| `OPENBOT_LOCAL_MODELS` | `true`. The API server then requires `OPENAI_BASE_URL` on loopback and refuses to start otherwise, never answers through a subscription plan, and never sends the package's stored credential. |
+| `OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` |
+| `OPENAI_CONTAINER_BASE_URL` | `http://host.docker.internal:11434/v1` |
+| `OPENAI_API_KEY` | `ollama`, a placeholder. |
+| `BOT_MODEL`, `AGENT_BOT_MODEL` | `OPENBOT_LOCAL_MODEL`, default `qwen3.5:4b`. |
+| `BOT_PROVIDER`, `BOT_RESPONSES_API` | `openai`, `false`: local servers speak chat completions. |
+| `OPENBOT_GENERATIVE_UI` | `false`. The generated-interface catalog and its guides add about 60,000 characters to every request, which a laptop model takes over a minute to read. Gallery components (charts, tables, forms) are unaffected. |
+| `COMPOSE_FILE` | Adds `compose.local.yml`, which takes the gateway key off the computer and mounts `agent-computer/opencode.local.json` in place of `opencode.json`. |
+
+If Ollama is not running, the script starts it on `127.0.0.1` with a 64K context, a quantised KV cache and one model resident at a time. 64K is the minimum [Ollama documents for opencode](https://docs.ollama.com/integrations/opencode). It refuses to continue if Ollama is listening anywhere other than loopback, because Ollama has no sign-in. An Ollama that was already running, such as one started by hand with `ollama serve` or the menu-bar app, keeps its own settings, and on a 16 GB machine Ollama picks a 4096-token context for itself. Too short is not an error: the start of the prompt is dropped and the Bot answers without its instructions. `./run-openbot.sh status` says when the running Ollama is not the one the script started. `./run-openbot.sh stop` stops the Ollama the script started, and leaves one started any other way running.
+
+The script starts Ollama once, at launch, and nothing restarts it. If it stops, local Bots fail their next turn and `status` reports it as down. `./run-openbot.sh ollama` starts only the model server, with the settings above. OpenBot needs no restart, because it dials the address on every call. It does not stop an Ollama that was started some other way; it prints the command that does.
+
+opencode runs inside the computer container, so it is configured with the provider block from that page rather than `ollama launch opencode`, which starts opencode on the host. The only difference is the address, `host.docker.internal` instead of `localhost`, because `localhost` inside the container is the container.
+
+To change the model, set `OPENBOT_LOCAL_MODEL` in the shell or in `.env` for the Bots, and edit `model`, `small_model` and the `models` entry in `agent-computer/opencode.local.json` for opencode. Pull every model you name first. On a 16 GB Mac about 11 GB is usable for weights and context once macOS, Docker and a browser have theirs, so one model of 9B or fewer parameters at 4-bit is the practical ceiling. Two resident at once swap. The default is `qwen3.5:4b` (about 3.4 GB), because with Docker and a browser running, `qwen3.5:9b` (6.6 GB) left a 16 GB Mac swapping and read a prompt at about 360 tokens a second. `qwen3.5:9b` answers better, and is the one to set on a machine with more memory. Expect either to do conversation and scoped edits well, and long multi-step coding clearly worse than a frontier model.
+
+Local mode is not offline. CopilotKit Intelligence still holds threads and memory, so the deployment needs its connection and transcripts still reach it. opencode also downloads its `@ai-sdk/openai-compatible` provider package the first time it runs.
+
 ## Authentication
 
 | Variable                     | Meaning                                                                                |

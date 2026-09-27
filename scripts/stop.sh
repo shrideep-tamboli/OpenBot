@@ -162,5 +162,5 @@ $(green "Stopped.")
 Nothing was deleted. PostgreSQL, each Bot's files and each Bot's browser profile are Docker
 volumes, so channels, credentials and signed-in sessions are all still there next time.
 
-Start again: bash scripts/start.sh
+Start again: ./run-openbot.sh   (add --local to answer every model call on this Mac)
 EOF
