@@ -15,6 +15,7 @@ import {
   builtInAgentConfiguration,
   createRequestAgents,
   type LoadInstructions,
+  qualifiedModelName,
   registeredAgentFromRow,
   resolveRuntimeAgents,
   runtimeModelForEnvironment,
@@ -2440,5 +2441,202 @@ describe("where an attachment reaches the model, and where it deliberately does 
       (messages[4] as { content?: { source?: unknown }[] }).content?.[0]
         ?.source,
     ).toMatchObject({ type: "data" });
+  });
+});
+
+/**
+ * The name a built-in Bot's runtime is asked for.
+ *
+ * This is the one model call in the process that composes a name rather than passing the configured
+ * one through. `BOT_MODEL` overrides the package model whenever an OpenAI-compatible endpoint is
+ * named, and a gateway's catalogue is namespaced, so the configured value is already `provider/model`
+ * — prefixing it again asked for `openai/openai/gpt-5.6-sol`.
+ *
+ * Tested here rather than through a run because the failure has no signature at this layer: the
+ * request is well formed and the vendor is the one that refuses it, so a test that only asserts
+ * "a run happened" passes with the wrong name in it.
+ */
+describe("the model name a built-in Bot is given", () => {
+  const openai = { provider: "openai" as const, defaultModel: "gpt-5.6-terra" };
+
+  test("passes a namespaced model through, rather than prefixing it twice", () => {
+    expect(
+      qualifiedModelName({ ...openai, defaultModel: "openai/gpt-5.6-sol" }),
+    ).toBe("openai/gpt-5.6-sol");
+  });
+
+  test("keeps the vendor the gateway was told, not the provider we resolved", () => {
+    // A gateway fronts several vendors, so the namespace in BOT_MODEL is the one that decides.
+    // `openai/anthropic/claude-opus-5` would be nobody's model.
+    expect(
+      qualifiedModelName({
+        ...openai,
+        defaultModel: "anthropic/claude-opus-5",
+      }),
+    ).toBe("anthropic/claude-opus-5");
+  });
+
+  test("still qualifies a bare model name", () => {
+    expect(qualifiedModelName(openai)).toBe("openai/gpt-5.6-terra");
+    expect(
+      qualifiedModelName({
+        provider: "anthropic",
+        defaultModel: "claude-sonnet-4-5",
+      }),
+    ).toBe("anthropic/claude-sonnet-4-5");
+  });
+
+  test("end to end from the environment a gateway deployment actually sets", () => {
+    const model = runtimeModelForEnvironment(openai, {
+      BOT_MODEL: "openai/gpt-5.6-sol",
+      OPENAI_BASE_URL: "https://ai-gateway.vercel.sh/v1",
+    });
+    expect(qualifiedModelName(model)).toBe("openai/gpt-5.6-sol");
+  });
+});
+
+/**
+ * `run-openbot.sh --local`: every built-in Bot answered by a model on this machine.
+ *
+ * The run is driven end to end against a recorder because the thing worth pinning is the wire, not
+ * the configuration object: local servers implement chat completions far better than the Responses
+ * API the runtime would otherwise pick, and a Bot pointed at the wrong one fails with a well-formed
+ * request that the server simply does not understand.
+ */
+describe("local models", () => {
+  const packageModel = {
+    provider: "openai" as const,
+    defaultModel: "gpt-5.6-terra",
+  };
+  const local = {
+    OPENBOT_LOCAL_MODELS: "true",
+    OPENAI_BASE_URL: "http://127.0.0.1:11434/v1",
+    BOT_MODEL: " qwen3.5:9b ",
+  };
+
+  test("takes the model from BOT_MODEL and marks the deployment local", () => {
+    expect(runtimeModelForEnvironment(packageModel, local)).toEqual({
+      provider: "openai",
+      defaultModel: "qwen3.5:9b",
+      local: true,
+    });
+  });
+
+  test("never answers through a subscription plan, which calls its vendor", () => {
+    expect(
+      runtimeModelForEnvironment(packageModel, {
+        ...local,
+        CLAUDE_CODE_OAUTH_TOKEN: "subscription-token",
+      }).plan,
+    ).toBeUndefined();
+  });
+
+  test("never answers on Anthropic, even when the provider says so", () => {
+    expect(
+      runtimeModelForEnvironment(
+        { provider: "anthropic", defaultModel: "claude-sonnet-4-5" },
+        { ...local, BOT_PROVIDER: "anthropic" },
+      ).provider,
+    ).toBe("openai");
+  });
+
+  test.each([
+    "https://ai-gateway.vercel.sh/v1",
+    "http://192.168.1.20:11434/v1",
+    "http://host.docker.internal:11434/v1",
+    "not a url",
+    "",
+  ])("refuses an endpoint that is not this machine: %p", (address) => {
+    expect(() =>
+      runtimeModelForEnvironment(packageModel, {
+        ...local,
+        OPENAI_BASE_URL: address,
+      }),
+    ).toThrow("OPENAI_BASE_URL on this machine");
+  });
+
+  test.each(["http://localhost:11434/v1", "http://[::1]:11434/v1"])(
+    "accepts every loopback spelling: %p",
+    (address) => {
+      expect(
+        runtimeModelForEnvironment(packageModel, {
+          ...local,
+          OPENAI_BASE_URL: address,
+        }).local,
+      ).toBe(true);
+    },
+  );
+
+  test("refuses to start without a model name", () => {
+    expect(() =>
+      runtimeModelForEnvironment(packageModel, { ...local, BOT_MODEL: " " }),
+    ).toThrow("needs BOT_MODEL");
+  });
+
+  test("leaves a deployment without the flag exactly as it was", () => {
+    const { OPENBOT_LOCAL_MODELS: _, ...online } = local;
+    const model = runtimeModelForEnvironment(packageModel, online);
+    expect(model.local).toBeUndefined();
+    expect(
+      builtInAgentConfiguration(
+        {
+          id: "general-assistant",
+          name: "General Assistant",
+          type: "built_in",
+          systemPrompt: "Be helpful.",
+        },
+        model,
+        "openai-secret",
+      ).model,
+    ).toBe("openai/qwen3.5:9b");
+  });
+
+  test("a built-in Bot answers over chat completions on the local server", async () => {
+    const recorder = new LLMock();
+    const originalBase = process.env.OPENAI_BASE_URL;
+    try {
+      process.env.OPENAI_BASE_URL = `${await recorder.start()}/v1`;
+      recorder.onMessage(/.*/, {
+        type: "text",
+        content: "LOCALMODEL001 answered on this machine.",
+      });
+      const model = runtimeModelForEnvironment(packageModel, {
+        ...local,
+        OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+      });
+      const agents = await resolveRuntimeAgents(
+        () => [
+          {
+            id: "general-assistant",
+            name: "General Assistant",
+            type: "built_in" as const,
+            systemPrompt: "Be helpful.",
+          },
+        ],
+        model,
+        async () => "ollama",
+      );
+      const agent = agents["general-assistant"]?.clone();
+      if (!agent) throw new Error("Expected General Assistant.");
+      agent.addMessage({
+        id: "localmodel001-request",
+        role: "user",
+        content: "Answer locally.",
+      });
+      await agent.runAgent();
+
+      expect(agent.messages.at(-1)).toMatchObject({
+        role: "assistant",
+        content: "LOCALMODEL001 answered on this machine.",
+      });
+      const [request] = recorder.getRequests();
+      expect(recorder.getRequests()).toHaveLength(1);
+      expect(request?.path).toBe("/v1/chat/completions");
+      expect(request?.body?.model).toBe("qwen3.5:9b");
+    } finally {
+      if (originalBase === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = originalBase;
+      await recorder.stop();
+    }
   });
 });

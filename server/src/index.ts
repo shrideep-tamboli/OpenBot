@@ -521,17 +521,28 @@ const stallGuard = createStallGuard({
 normalizeModelBaseUrls();
 const runtimeModel = runtimeModelForEnvironment(tenantPackage.model);
 
-const intentRouter = createIntentRouter({
-  complete: createModelCompleter({
-    model: runtimeModel,
-    resolveApiKey: () =>
-      resolveModelApiKey({
+/**
+ * The deployment's model key, resolved per call so a credential rotated a moment ago is used next.
+ *
+ * Local mode reads only the environment. The package's stored credential is the cloud key, and a
+ * model on this machine needs no key at all: sending it there would hand it to whatever process is
+ * listening on that port.
+ */
+const resolveRuntimeModelApiKey = async () =>
+  runtimeModel.local
+    ? process.env.OPENAI_API_KEY?.trim() || null
+    : resolveModelApiKey({
         encryptionKey: config.keyEncryptionKey,
         reader: credentialStore,
         provider: runtimeModel.provider,
         keyId: tenantPackage.model.credentialSecretRef,
         environment: process.env,
-      }),
+      });
+
+const intentRouter = createIntentRouter({
+  complete: createModelCompleter({
+    model: runtimeModel,
+    resolveApiKey: resolveRuntimeModelApiKey,
   }),
 });
 
@@ -543,14 +554,7 @@ const intentRouter = createIntentRouter({
  */
 const chooseSkills = createModelCompleter({
   model: runtimeModel,
-  resolveApiKey: () =>
-    resolveModelApiKey({
-      encryptionKey: config.keyEncryptionKey,
-      reader: credentialStore,
-      provider: runtimeModel.provider,
-      keyId: tenantPackage.model.credentialSecretRef,
-      environment: process.env,
-    }),
+  resolveApiKey: resolveRuntimeModelApiKey,
 });
 
 /*
@@ -563,16 +567,6 @@ const chooseSkills = createModelCompleter({
  * another way at three in the morning, with nothing to point at. So each of these is written once and
  * passed to both.
  */
-
-/** The deployment's model key, resolved per call so a credential rotated a moment ago is used next. */
-const resolveRuntimeModelApiKey = () =>
-  resolveModelApiKey({
-    encryptionKey: config.keyEncryptionKey,
-    reader: credentialStore,
-    provider: runtimeModel.provider,
-    keyId: tenantPackage.model.credentialSecretRef,
-    environment: process.env,
-  });
 
 const hostAccessBroker = createHostAccessBroker();
 

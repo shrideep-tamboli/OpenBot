@@ -1,6 +1,10 @@
 import type { BaseEvent, Message, RunAgentInput } from "@ag-ui/client";
+import { createOpenAI } from "@ai-sdk/openai";
 import { AbstractAgent, HttpAgent } from "@ag-ui/client";
-import type { BuiltInAgentConfiguration } from "@copilotkit/runtime/v2";
+import type {
+  BuiltInAgentClassicConfig,
+  BuiltInAgentConfiguration,
+} from "@copilotkit/runtime/v2";
 import {
   BuiltInAgent,
   CopilotKitIntelligence,
@@ -161,7 +165,36 @@ export type RuntimeModel = {
   provider: "openai" | "anthropic";
   defaultModel: string;
   plan?: PlanModelConfig;
+  /** Answered by a model on this machine: `OPENBOT_LOCAL_MODELS`, set by `run-openbot.sh --local`. */
+  local?: true;
 };
+
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Local mode's endpoint, which must be this machine.
+ *
+ * The flag's promise is that prompts stay on the machine, so an endpoint anywhere else is refused
+ * at boot rather than honoured: a stale `OPENAI_BASE_URL` pointing at a gateway would otherwise run
+ * a deployment labelled local against the cloud, and nothing would say so.
+ */
+function localModelBaseUrl(
+  environment: Record<string, string | undefined>,
+): string {
+  const value = environment.OPENAI_BASE_URL?.trim() ?? "";
+  let hostname = "";
+  try {
+    hostname = new URL(value).hostname;
+  } catch {
+    // Reported below, with the same message as any other address.
+  }
+  if (!LOOPBACK_HOSTNAMES.has(hostname)) {
+    throw new Error(
+      `OPENBOT_LOCAL_MODELS=true needs OPENAI_BASE_URL on this machine (127.0.0.1, localhost or [::1]), not "${value}".`,
+    );
+  }
+  return value;
+}
 
 /** Optional desktop environment values may be present but blank; SDKs treat them as URLs. */
 export function normalizeModelBaseUrls(
@@ -185,6 +218,18 @@ export function runtimeModelForEnvironment(
   packageModel: RuntimeModel,
   environment: Record<string, string | undefined> = process.env,
 ): RuntimeModel {
+  if (environment.OPENBOT_LOCAL_MODELS?.trim() === "true") {
+    localModelBaseUrl(environment);
+    const selectedModel = environment.BOT_MODEL?.trim();
+    if (!selectedModel) {
+      throw new Error(
+        "OPENBOT_LOCAL_MODELS=true needs BOT_MODEL, the name the local server publishes.",
+      );
+    }
+    // No subscription plan: it answers through a harness that calls its vendor, not this machine.
+    return { provider: "openai", defaultModel: selectedModel, local: true };
+  }
+
   const selectedModel = environment.BOT_MODEL?.trim();
   const selectedProvider = environment.BOT_PROVIDER?.trim().toLowerCase();
   // The desktop writes an empty provider when switching back to OpenAI. An absent
@@ -211,6 +256,48 @@ export function runtimeModelForEnvironment(
     defaultModel:
       selectedModelApplies && selectedModel ? selectedModel : defaultModel,
   };
+}
+
+/**
+ * The name the runtime is given, which is `provider/model` — unless the model name already is one.
+ *
+ * {@link runtimeModelForEnvironment} lets `BOT_MODEL` override the package's model whenever an
+ * OpenAI-compatible endpoint is named, and an endpoint that namespaces its catalogue wants BOTH
+ * halves of the name: `openai/gpt-5.6-sol` on a gateway, `anthropic/claude-opus-5` beside it on the
+ * same one. `.env.example` documents writing it that way. Prefixing unconditionally then asked for
+ * `openai/openai/gpt-5.6-sol`, which no catalogue has.
+ *
+ * IT FAILED QUIETLY, which is the part worth guarding. Every other model call in this process — the
+ * intent router, tool selection, the channel titler — reads the same variable and sends the name
+ * unchanged, so a deployment behind a gateway looked entirely configured while its built-in Bots
+ * alone asked for a model that does not resolve.
+ *
+ * A slash is the test because a slash is what the namespace IS. A bare `gpt-5.5` still gets its
+ * provider prefix, so nothing changes for a deployment that names no endpoint.
+ */
+export function qualifiedModelName(model: RuntimeModel): string {
+  return model.defaultModel.includes("/")
+    ? model.defaultModel
+    : `${model.provider}/${model.defaultModel}`;
+}
+
+/**
+ * What a built-in Bot's runtime is given: a name for it to resolve, or, locally, the model itself.
+ *
+ * The runtime resolves an `openai/...` name to the Responses API. Servers on a laptop implement
+ * chat completions far more completely than they implement that, streamed tool calls above all, and
+ * a Bot whose tool calls arrive malformed simply stops. So local mode builds the chat-completions
+ * model here and hands it over whole, the same way a subscription plan's model is handed over.
+ */
+function runtimeLanguageModel(
+  model: RuntimeModel,
+  apiKey: string | null,
+): BuiltInAgentClassicConfig["model"] {
+  if (!model.local) return qualifiedModelName(model);
+  return createOpenAI({
+    baseURL: localModelBaseUrl(process.env),
+    apiKey: apiKey ?? undefined,
+  }).chat(model.defaultModel);
 }
 
 type RuntimeAgentRow = {
@@ -369,7 +456,7 @@ export function builtInAgentConfiguration(
   const standing = standingInstructionsGuidance(standingInstructions);
 
   return {
-    model: planModel ?? `${model.provider}/${model.defaultModel}`,
+    model: planModel ?? runtimeLanguageModel(model, apiKey),
     /*
      * The package's role, then the person's own standing instructions, then what this Bot actually
      * holds, then the computer.

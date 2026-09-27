@@ -357,6 +357,7 @@ runtime and data and opens the relevant connection screen.
 - Store credentials through `/admin/credentials`, which encrypts them. Do not put credential values in tenant YAML or in committed files.
 - `AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS` lets a Bot reach services on this machine. It ships commented out in `.env.example`, is for a laptop only, and a deployment running with `NODE_ENV=production` refuses to start while it is set.
 - To reach an agent on your own network from a deployment, list its address in `AGENT_ENDPOINT_ALLOWED_HOSTS` instead. That permits the one address, where the switch above permits the network.
+- `./run-openbot.sh --local` answers every model call on this machine through Ollama instead of the endpoint in `.env`. Threads still go to CopilotKit Intelligence. See [Local models](docs/configuration.md#local-models).
 
 ## Development
 

@@ -543,3 +543,51 @@ test("gives the selected harness the same governed callback as the framework Bot
     );
   }
 });
+
+/**
+ * `./run-openbot.sh --local` layers compose.local.yml on through COMPOSE_FILE. What it must
+ * guarantee is that the cloud key leaves the computer and opencode reads the local provider; what it
+ * must not do is change a single permission opencode had online.
+ */
+const LOCAL_COMPOSE_FILES =
+  "docker-compose.yml:compose.override.yml:compose.local.yml";
+const OPENCODE_CONFIG_TARGET = "/workspace/.config/opencode/opencode.json";
+
+function opencodeConfig(name: string) {
+  return JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "agent-computer", name), "utf8"),
+  ) as { model: string; permission: Record<string, string> };
+}
+
+test("keeps the gateway key off the computer in local mode", () => {
+  const computer = runComposeConfig({
+    COMPOSE_FILE: LOCAL_COMPOSE_FILES,
+    OPENAI_API_KEY: "synthetic-gateway-key",
+    AI_GATEWAY_API_KEY: "synthetic-gateway-key",
+  }).services["agent-computer"];
+
+  expect(computer.environment.AI_GATEWAY_API_KEY).toBe("");
+  expect(computer.environment.COMPUTER_SHELL_ENV).toBe("");
+  expect(computer.extra_hosts).toContain("host.docker.internal=host-gateway");
+});
+
+test("gives opencode the local provider in local mode and the gateway otherwise", () => {
+  const mounted = (env: Record<string, string>) =>
+    runComposeConfig(env)
+      .services["agent-computer"].volumes?.filter(
+        (volume) => volume.target === OPENCODE_CONFIG_TARGET,
+      )
+      .map((volume) => volume.source.split("/").at(-1));
+
+  expect(mounted({ COMPOSE_FILE: LOCAL_COMPOSE_FILES })).toEqual([
+    "opencode.local.json",
+  ]);
+  expect(mounted({})).toEqual(["opencode.json"]);
+});
+
+test("gives opencode the same permissions on a local model as on the gateway", () => {
+  const local = opencodeConfig("opencode.local.json");
+
+  expect(local.permission).toEqual(opencodeConfig("opencode.json").permission);
+  expect(local.model.startsWith("ollama/")).toBe(true);
+});
